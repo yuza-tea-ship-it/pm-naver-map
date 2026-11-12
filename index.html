@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>필지 지도 · 네이버 배경</title>
+<style>
+  html, body, #map { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #f2f2ef; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+/*
+ * pm-naver-map — 필지 지도(parcel_map 크롬 확장)의 네이버 지도 · 지적편집도 배경 페이지 (2026-11-10 · PLAN_1110)
+ *
+ * 이 페이지는 키를 담지 않습니다. 확장(부모 창)이 postMessage 로 키를 넘기면 그때 네이버 지도 SDK 를 불러옵니다.
+ * 네이버 인증은 이 페이지 주소(Web 서비스 URL)로 판정합니다.
+ * 부모 -> 이 페이지: {type:'pm-nv-init', key} · {type:'pm-nv-type', mapType:'normal'|'hybrid'} · {type:'pm-nv-view', lat, lng, zoom} · {type:'pm-nv-cad', on}
+ * 지도 종류(일반 · 위성+지명)를 바꿔도 지적편집도는 그대로 켜 둡니다.
+ * 이 페이지 -> 부모: {type:'pm-nv-ready', v:2}(실림 · 비밀 없음 · v = 규약 판 — 11-11 pm-nv-type 을 아는 판) · {type:'pm-nv-loaded'} · {type:'pm-nv-auth-fail'} · {type:'pm-nv-error', msg}
+ * 받는 출처: chrome-extension://(확장) · http://localhost(시험)만. 처음 init 을 보낸 창 · 출처만 계속 받고, 그 창 · 출처로만 답합니다.
+ * 조작은 전부 끕니다(끌기 · 휠 · 두 번 누르기 — 조작은 확장 지도가 하고 이 페이지는 따라만 갑니다). 네이버 로고는 가리지 않습니다.
+ */
+(function () {
+  'use strict';
+  var SDK = 'https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=';
+  var KEY_RE = /^[A-Za-z0-9]{6,40}$/;
+  var ORIGIN_RE = /^(?:chrome-extension:\/\/[a-p]{32}|http:\/\/localhost(?::\d{1,5})?)$/;
+  var st = { src: null, origin: null, started: false, map: null, cad: null, cadOn: true, view: null, failed: false, mapType: 'normal' };
+  function typeId(nm) { return st.mapType === 'hybrid' ? nm.MapTypeId.HYBRID : nm.MapTypeId.NORMAL; }
+
+  function send(msg) {
+    if (!st.src) return;
+    try { st.src.postMessage(msg, st.origin); } catch (e) { /* 부모가 사라짐 */ }
+  }
+  window.navermap_authFailure = function () {
+    st.failed = true;
+    send({ type: 'pm-nv-auth-fail' });
+  };
+  function applyView() {
+    var nm = window.naver && window.naver.maps;
+    if (!st.map || !st.view || !nm) return;
+    st.map.setZoom(st.view.zoom, false);
+    st.map.setCenter(new nm.LatLng(st.view.lat, st.view.lng));
+  }
+  // 🔴 11-11 §6-5(검토) — 창(iframe) 크기가 바뀌면(확장 캡처 보기 켬/끔 · 창 크기 바꿈) 지도 크기를 창에 맞추고 같은 view 로 다시 맞춥니다. 지도를 만들기 전이면 아무것도 안 함.
+  function fitSize() {
+    var nm = window.naver && window.naver.maps;
+    if (!st.map || !nm || typeof nm.Size !== 'function' || typeof st.map.setSize !== 'function') return;
+    st.map.setSize(new nm.Size(window.innerWidth, window.innerHeight));
+    applyView();
+  }
+  window.addEventListener('resize', fitSize);
+  function start(key) {
+    st.started = true;
+    var s = document.createElement('script');
+    s.onload = function () {
+      var nm = window.naver && window.naver.maps;
+      if (!nm || typeof nm.Map !== 'function') { send({ type: 'pm-nv-error', msg: 'SCRIPT' }); return; }
+      try {
+        var v = st.view || { lat: 37.5665, lng: 126.978, zoom: 15 };
+        st.map = new nm.Map(document.getElementById('map'), {
+          center: new nm.LatLng(v.lat, v.lng),
+          zoom: v.zoom,
+          mapTypeId: typeId(nm),
+          draggable: false,
+          scrollWheel: false,
+          pinchZoom: false,
+          keyboardShortcuts: false,
+          disableDoubleClickZoom: true,
+          disableDoubleTapZoom: true,
+          disableTwoFingerTapZoom: true,
+          disableKineticPan: true,
+          zoomControl: false,
+          mapTypeControl: false,
+          scaleControl: false
+        });
+        st.cad = new nm.CadastralLayer();
+        if (st.cadOn) st.cad.setMap(st.map);
+        if (!st.failed) send({ type: 'pm-nv-loaded' });
+      } catch (e) { send({ type: 'pm-nv-error', msg: 'MAP' }); }
+    };
+    s.onerror = function () { send({ type: 'pm-nv-error', msg: 'SCRIPT' }); };
+    s.src = SDK + encodeURIComponent(key);
+    document.head.appendChild(s);
+  }
+  window.addEventListener('message', function (ev) {
+    var d = ev && ev.data;
+    if (!d || typeof d !== 'object' || typeof d.type !== 'string') return;
+    if (!ORIGIN_RE.test(String(ev.origin || ''))) return;
+    if (st.src && (ev.source !== st.src || ev.origin !== st.origin)) return;
+    if (d.type === 'pm-nv-init') {
+      if (st.started || st.src) return;
+      st.src = ev.source;
+      st.origin = ev.origin;
+      if (typeof d.key !== 'string' || !KEY_RE.test(d.key)) { send({ type: 'pm-nv-error', msg: 'KEY' }); return; }
+      start(d.key);
+      return;
+    }
+    if (!st.src) return;
+    if (d.type === 'pm-nv-view') {
+      var lat = Number(d.lat), lng = Number(d.lng), z = Math.round(Number(d.zoom));
+      if (!isFinite(lat) || !isFinite(lng) || !isFinite(z)) return;
+      st.view = { lat: lat, lng: lng, zoom: z };
+      applyView();
+    } else if (d.type === 'pm-nv-type') {
+      if (d.mapType !== 'normal' && d.mapType !== 'hybrid') return;
+      st.mapType = d.mapType;
+      var nm2 = window.naver && window.naver.maps;
+      if (st.map && nm2) st.map.setMapTypeId(typeId(nm2));
+    } else if (d.type === 'pm-nv-cad') {
+      st.cadOn = !!d.on;
+      if (st.cad && st.map) st.cad.setMap(st.cadOn ? st.map : null);
+    }
+  });
+  if (window.parent && window.parent !== window) {
+    try { window.parent.postMessage({ type: 'pm-nv-ready', v: 2 }, '*'); } catch (e) { /* 부모 없음 */ }   // v = 규약 판(확장이 2 가 아니면 키를 안 보냄)
+  }
+})();
+</script>
+</body>
+</html>
